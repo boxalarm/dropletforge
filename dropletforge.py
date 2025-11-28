@@ -46,6 +46,15 @@ def list_droplets():
     headers = ["ID", "Name", "Status", "Public IP"]
     print(tabulate(data, headers=headers, tablefmt="grid"))
 
+# Helper function to retrieve details like droplet name, public IP, etc.
+def get_droplet(droplet_id):
+    try:
+        resp = client.droplets.get(droplet_id)
+        return resp["droplet"]
+    except Exception as e:
+        print(f"{Fore.RED}Unexpected error: {str(e)}{Style.RESET_ALL}")
+        return None
+
 def get_allowed_ip(override_ip=None):
     if override_ip:
         print(f" [+] Using provided IP: {override_ip}")
@@ -174,8 +183,7 @@ def create_droplet(droplet_name, region, size, image):
         time.sleep(1) 
         print(".", end="", flush=True)
 
-        details = client.droplets.get(droplet_id)
-        droplet = details["droplet"]
+        droplet = get_droplet(droplet_id)
         status = droplet["status"]
 
         if status != "active":
@@ -197,8 +205,7 @@ def create_droplet(droplet_name, region, size, image):
 # This function provides the SSH command to access droplet
 def get_ssh_cmd(droplet_id):
     try:
-        resp = client.droplets.get(droplet_id)
-        droplet = resp["droplet"]
+        droplet = get_droplet(droplet_id)
         for net in droplet["networks"]["v4"]:
             if net["type"] == "public":
                 public_ip = net["ip_address"]
@@ -211,19 +218,60 @@ def get_ssh_cmd(droplet_id):
         print(f"\n{Fore.RED}Unexpected error: {str(e)}{Style.RESET_ALL}")
 
 def destroy_droplet(droplet_id):
-    print(f"{Fore.RED}WARNING: This will permanently delete droplet ID {args.destroy}!{Style.RESET_ALL}")
+    # Get the actual droplet name first
+    droplet = get_droplet(droplet_id)
+
+    print(f"{Fore.RED}WARNING: This will permanently delete the following droplet and its associated SSH keys and firewall:{Style.RESET_ALL}")
+    print(f"    - Name: {droplet["name"]}")
+    print(f"    - ID: {droplet_id}\n")
+    
     confirm = input("Type 'yes' to confirm: ")
     if confirm == "yes":
         try:
-            resp = client.droplets.destroy(droplet_id=droplet_id)
+            destroy = client.droplets.destroy(droplet_id=droplet_id)
             # Response will be "None" if droplet was successfully destroyed
             print(f"\n{Fore.GREEN}Droplet '{args.destroy}' destroyed successfully{Style.RESET_ALL}")
-            
+
+            # After droplet has been destroyed - delete SSH keys and firewall associated with droplet
+            pub_key = os.path.expanduser(f"~/.ssh/{droplet["name"]}.pub")
+            priv_key = os.path.expanduser(f"~/.ssh/{droplet["name"]}")
+
+            os.remove(pub_key)
+            os.remove(priv_key)
+
+            print(f"{Fore.GREEN}SSH keys '{pub_key}' and '{priv_key}' deleted successfully")
+
+            # Delete firewall
+            firewall_id = get_fw_id_by_name(f"DropletForge-{droplet["name"]}")
+            client.firewalls.delete(firewall_id=firewall_id)
+            print(f"{Fore.GREEN}Firewall 'DropletForge-{droplet["name"]}' removed successfully")
+
         except Exception as e:
             print(f"\n{Fore.RED}Unexpected error: {str(e)}{Style.RESET_ALL}")
-
+                    
     else:
         print(f"\n{Fore.YELLOW}Aborted.{Style.RESET_ALL}")
+
+# Return the ID of a firewall given its name
+def get_fw_id_by_name(fw_name):
+    resp = client.firewalls.list()["firewalls"]
+    for firewall in resp:
+        if firewall["name"] == fw_name:
+            return firewall["id"]
+
+def list_firewalls():
+    resp = client.firewalls.list()["firewalls"]
+    data = []
+    for firewall in resp:
+        id = firewall["id"]
+        name = firewall["name"]
+
+        data.append([id, name])
+    
+    headers = ["ID", "Name"]
+    print(tabulate(data, headers=headers, tablefmt="grid"))
+
+    return resp
 
 def shutdown_droplet(droplet_id):
     req = {
@@ -238,8 +286,7 @@ def shutdown_droplet(droplet_id):
         while True:
             time.sleep(1)
             print(".", end="", flush=True)
-            details = client.droplets.get(droplet_id)
-            status = details["droplet"]["status"]
+            status = get_droplet(droplet_id)["status"]
             if status == "off":
                 print(f"\n{Fore.RED}Droplet is now OFF{Style.RESET_ALL}")
                 break
@@ -259,8 +306,7 @@ def power_on_droplet(droplet_id):
         while True:
             time.sleep(1)
             print(".", end="", flush=True)
-            details = client.droplets.get(droplet_id)
-            status = details["droplet"]["status"]
+            status = get_droplet(droplet_id)["status"]
             if status == "active":
                 print(f"\n{Fore.GREEN}Droplet is now ON{Style.RESET_ALL}")
                 break
@@ -298,7 +344,7 @@ def parse_arguments():
     parser.add_argument("--image", default="ubuntu-24-04-x64", help="Image")
     parser.add_argument("--off", type=int, metavar="DROPLET_ID", help="Shutdown a droplet")
     parser.add_argument("--on", type=int, metavar="DROPLET_ID", help="Power on a droplet")
-
+    parser.add_argument("--list-fw", action="store_true", help="List all firewalls")
 
     args = parser.parse_args()
     return args
@@ -318,6 +364,9 @@ if __name__ == "__main__":
 
     elif args.on:
         power_on_droplet(args.on)
+
+    elif args.list_fw:
+        list_firewalls()
 
     elif args.create and not args.name:
         print(f"{Fore.YELLOW}--create requires --name to be specified{Style.RESET_ALL}")
